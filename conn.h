@@ -100,4 +100,6 @@ int has_reserved_this_job(conn c, job j);
 int conn_has_close_deadline(conn c);
 int conn_ready(conn c);
 
+job get_reserved_jobs();
+
 #endif /*conn_h*/

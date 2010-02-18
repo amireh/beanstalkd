@@ -71,6 +71,9 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
 #define CMD_STATS_TUBE "stats-tube "
 #define CMD_QUIT "quit"
 #define CMD_PAUSE_TUBE "pause-tube"
+#define CMD_LIST_JOBS_READY "list-jobs-ready"
+#define CMD_LIST_JOBS_RESERVED "list-jobs-reserved"
+#define CMD_LIST_JOBS_BURIED "list-jobs-buried"
 
 #define CONSTSTRLEN(m) (sizeof(m) - 1)
 
@@ -95,6 +98,9 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
 #define CMD_LIST_TUBES_WATCHED_LEN CONSTSTRLEN(CMD_LIST_TUBES_WATCHED)
 #define CMD_STATS_TUBE_LEN CONSTSTRLEN(CMD_STATS_TUBE)
 #define CMD_PAUSE_TUBE_LEN CONSTSTRLEN(CMD_PAUSE_TUBE)
+#define CMD_LIST_JOBS_READY_LEN CONSTSTRLEN(CMD_LIST_JOBS_READY)
+#define CMD_LIST_JOBS_RESERVED_LEN CONSTSTRLEN(CMD_LIST_JOBS_RESERVED)
+#define CMD_LIST_JOBS_BURIED_LEN CONSTSTRLEN(CMD_LIST_JOBS_BURIED)
 
 #define MSG_FOUND "FOUND"
 #define MSG_NOTFOUND "NOT_FOUND\r\n"
@@ -155,7 +161,10 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
 #define OP_TOUCH 21
 #define OP_QUIT 22
 #define OP_PAUSE_TUBE 23
-#define TOTAL_OPS 24
+#define OP_LIST_JOBS_READY 24
+#define OP_LIST_JOBS_RESERVED 25
+#define OP_LIST_JOBS_BURIED 26
+#define TOTAL_OPS 27
 
 #define STATS_FMT "---\n" \
     "current-jobs-urgent: %u\n" \
@@ -185,6 +194,9 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
     "cmd-list-tube-used: %" PRIu64 "\n" \
     "cmd-list-tubes-watched: %" PRIu64 "\n" \
     "cmd-pause-tube: %" PRIu64 "\n" \
+    "cmd-list-jobs-ready: %" PRIu64 "\n" \
+    "cmd-list-jobs-reserved: %" PRIu64 "\n" \
+    "cmd-list-jobs-buried: %" PRIu64 "\n" \
     "job-timeouts: %" PRIu64 "\n" \
     "total-jobs: %" PRIu64 "\n" \
     "max-job-size: %zu\n" \
@@ -263,7 +275,10 @@ static const char * op_names[] = {
     CMD_RESERVE_TIMEOUT,
     CMD_TOUCH,
     CMD_QUIT,
-    CMD_PAUSE_TUBE
+    CMD_PAUSE_TUBE,
+    CMD_LIST_JOBS_READY,
+    CMD_LIST_JOBS_RESERVED,
+    CMD_LIST_JOBS_BURIED
 };
 #endif
 
@@ -279,7 +294,6 @@ static void
 reply(conn c, const char *line, int len, int state)
 {
     int r;
-
     if (!c) return;
 
     r = conn_update_evq(c, EV_WRITE | EV_PERSIST);
@@ -745,6 +759,9 @@ which_cmd(conn c)
     TEST_CMD(c->cmd, CMD_LIST_TUBES, OP_LIST_TUBES);
     TEST_CMD(c->cmd, CMD_QUIT, OP_QUIT);
     TEST_CMD(c->cmd, CMD_PAUSE_TUBE, OP_PAUSE_TUBE);
+    TEST_CMD(c->cmd, CMD_LIST_JOBS_READY, OP_LIST_JOBS_READY);
+    TEST_CMD(c->cmd, CMD_LIST_JOBS_RESERVED, OP_LIST_JOBS_RESERVED);
+    TEST_CMD(c->cmd, CMD_LIST_JOBS_BURIED, OP_LIST_JOBS_BURIED);
     return OP_UNKNOWN;
 }
 
@@ -858,6 +875,9 @@ fmt_stats(char *buf, size_t size, void *x)
             op_ct[OP_LIST_TUBE_USED],
             op_ct[OP_LIST_TUBES_WATCHED],
             op_ct[OP_PAUSE_TUBE],
+            op_ct[OP_LIST_JOBS_READY],
+            op_ct[OP_LIST_JOBS_RESERVED],
+            op_ct[OP_LIST_JOBS_BURIED],
             timeout_ct,
             global_stat.total_jobs_ct,
             job_data_size_limit,
@@ -1008,6 +1028,44 @@ do_list_tubes(conn c, ms l)
         t = l->items[i];
         buf += snprintf(buf, 4 + strlen(t->name), "- %s\n", t->name);
     }
+
+    buf[0] = '\r';
+    buf[1] = '\n';
+
+    c->out_job_sent = 0;
+    return reply_line(c, STATE_SENDJOB, "OK %d\r\n", resp_z - 2);
+}
+static void
+do_list_jobs(conn c, uint64_t* jobs, size_t nrJobs)
+{
+    char *buf;
+    char *_lenbuf = malloc(sizeof(uint64_t)); // used to parse char length of id which is uint64_t
+    size_t resp_z;
+    int i;
+
+    dprintf("| ----- do_list_jobs() -----\n");
+
+    resp_z = 6; /* initial "---\n" and final "\r\n" */
+    for (i = 0; i < nrJobs; ++i) {
+        dprintf("| Measuring length of job with id %llu at %d.\n", jobs[i], i);
+
+        sprintf(_lenbuf, "%llu", jobs[i]);
+        resp_z += 3 + strlen(_lenbuf); /* including "- " and "\n" */
+    }
+
+    c->out_job = allocate_job(resp_z); /* fake job to hold response data */
+    if (!c->out_job) return reply_serr(c, MSG_OUT_OF_MEMORY);
+
+    /* now actually format the response */
+    buf = c->out_job->body;
+    buf += snprintf(buf, 5, "---\n");
+
+    for (i = 0; i < nrJobs; i++) {
+        sprintf(_lenbuf, "%llu", jobs[i]);
+        dprintf("| Adding to buffer job with id %llu\n", jobs[i]);
+        buf += snprintf(buf, 4 + strlen(_lenbuf), "- %llu\n", jobs[i]);
+    }
+
     buf[0] = '\r';
     buf[1] = '\n';
 
@@ -1134,17 +1192,20 @@ prot_remove_tube(tube t)
 static void
 dispatch_cmd(conn c)
 {
-    int r, i, timeout = -1;
+    int r, i, x, timeout = -1;
     size_t z;
     unsigned int count;
-    job j;
+    job j, first_job;
     unsigned char type;
     char *size_buf, *delay_buf, *ttr_buf, *pri_buf, *end_buf, *name;
     unsigned int pri, body_size;
     usec delay, ttr;
-    uint64_t id;
+    uint64_t id, *all_jobs = NULL, **res_jobs = NULL;
     tube t = NULL;
-
+    job *ready_jobs = NULL;
+    unsigned int itr, nrJobs, nrConns, *nrJobsInC;
+    conn _cItr, _cTmp;
+ 
     /* NUL-terminate this string so we can use strtol and friends */
     c->cmd[c->cmd_len - 2] = '\0';
 
@@ -1516,6 +1577,136 @@ dispatch_cmd(conn c)
         set_main_delay_timeout();
 
         reply_line(c, STATE_SENDWORD, "PAUSED\r\n");
+        break;
+      case OP_LIST_JOBS_READY:  
+        errno = 0;
+        if (errno) return reply_msg(c, MSG_BAD_FORMAT);
+       
+        t = c->use;
+        ready_jobs = pq_heap(&t->ready);
+        itr=t->ready.used;
+
+        all_jobs = malloc(itr*sizeof(uint64_t));
+
+        for (i=0; i<itr; ++i)
+          all_jobs[i] = ready_jobs[i]->id;
+
+        op_ct[type]++;
+        do_list_jobs(c, all_jobs, itr);
+
+        free(all_jobs);
+        ready_jobs = 0;
+        break;
+      case OP_LIST_JOBS_RESERVED:
+        errno = 0;
+
+        // Since reserved jobs are connection-exclusive,
+        // we have to iterate through all runnning connections
+        // and find the ones that are using c->tube (thus reserving
+        // the jobs we're monitoring) and add their ids to the all_jobs
+        // container
+
+        // first connection
+        _cTmp = &running;
+
+        first_job = 0;
+        all_jobs = NULL;
+        nrJobs = nrConns = itr = x = 0;
+        _cItr = NULL;
+        res_jobs = NULL;
+        nrJobsInC = NULL;
+        
+        // find out number of connections
+        for (nrConns = 0, _cItr = _cTmp->next; _cItr != _cTmp; _cItr = _cItr->next) {
+          if (_cItr->use == c->use)
+            ++nrConns;
+        }
+
+        dprintf("| Found %d open connections using current tube.\n", nrConns);
+
+        // allocate enough memory for nrConns number of reserved jobs
+        res_jobs = malloc(nrConns*sizeof(uint64_t));
+     
+        // will be used for pulling jobs from res_jobs and pushing
+        // into our container which will be processed (all_jobs)
+        nrJobsInC = malloc(nrConns*sizeof(unsigned int));
+
+        // reset iterators and actually process the connections now
+        for (x=0,itr=0, _cItr = _cTmp->next; _cItr != _cTmp; _cItr = _cItr->next)
+        {
+          // is this connection using the tube we're processing?
+          if (_cItr->use != c->use)
+            continue;
+          
+          // retrieve handler to reserved jobs in this connection
+          first_job = get_reserved_jobs(_cItr);
+
+          // find out nr of reserved jobs in this connection
+          for (i=0, j = first_job->next; j != first_job; ++i, j = j->next);
+
+          dprintf("| \tFound %d reserved jobs in connection %d\n", i, itr);
+          res_jobs[itr] = malloc(i*sizeof(uint64_t));
+          
+          // add to total nr of jobs
+          nrJobs += i;
+          nrJobsInC[itr] = i;
+
+          // first job has to be discarded, since it does not point
+          // to a real job, only a placeholder for the head of list
+          for (i=0, j = first_job->next; j != first_job; ++i, j = j->next)
+            res_jobs[itr][i] = j->id; // store job for later processing
+
+          ++itr;
+        }
+
+        all_jobs = malloc(nrJobs*sizeof(uint64_t));
+
+        // reset counter for setting up our processing container
+        nrJobs = 0;
+        
+        // dump all jobs into array for processing
+        for (i=0; i<itr; ++i)
+          for (x=0; x<nrJobsInC[i]; ++x)
+            all_jobs[nrJobs++] = res_jobs[i][x];
+        
+        op_ct[type]++;
+        do_list_jobs(c, all_jobs, nrJobs);
+
+        // free up memory
+        for (i = 0; i < itr; i++)
+          free(res_jobs[i]);
+        free(res_jobs);
+        free(all_jobs);
+
+        break;
+    case OP_LIST_JOBS_BURIED:
+        errno = 0;
+
+        first_job = get_buried_jobs(c->use);
+
+        // first job has to be discarded, since it does not point
+        // to a real job, only a placeholder for the head of list
+        if (!first_job || (first_job->next == first_job))
+          return reply_msg(c, MSG_NOTFOUND);
+
+        // find out how many buried jobs there are to process
+        for (nrJobs=0, j = first_job->next; j != first_job; ++nrJobs, j = j->next);
+        
+        j = NULL;
+        all_jobs = NULL;
+
+        all_jobs = malloc(nrJobs*sizeof(uint64_t));
+
+        // store jobs for processing
+        for (itr=0, j = first_job->next; j != first_job; ++itr, j = j->next)
+          all_jobs[itr] = j->id;
+
+        op_ct[type]++;
+
+        // process!
+        do_list_jobs(c, all_jobs, itr);
+
+        free(all_jobs);
         break;
     default:
         return reply_msg(c, MSG_UNKNOWN_COMMAND);

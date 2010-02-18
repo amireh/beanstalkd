@@ -47,4 +47,5 @@ job pq_peek(pq q);
 /* remove and return j if the queue contains j, else return NULL */
 job pq_remove(pq q, job j);
 
+job* pq_heap(pq q);
 #endif /*q_h*/

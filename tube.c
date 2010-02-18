@@ -116,4 +116,8 @@ tube_find_or_make(const char *name)
 {
     return tube_find(name) ? : make_and_insert_tube(name);
 }
-
+job
+get_buried_jobs(tube t)
+{
+  return &t->buried;
+}

@@ -52,5 +52,5 @@ void tube_iref(tube t);
 tube tube_find(const char *name);
 tube tube_find_or_make(const char *name);
 #define TUBE_ASSIGN(a,b) (tube_dref(a), (a) = (b), tube_iref(a))
-
+job get_buried_jobs(tube t);
 #endif /*tube_h*/

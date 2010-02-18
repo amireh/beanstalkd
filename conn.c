@@ -151,7 +151,6 @@ conn_set_evq(conn c, const int events, evh handler)
     int r, margin = 0, should_timeout = 0;
     struct timeval tv = {INT_MAX, 0};
     usec t = UINT64_MAX;
-
     event_set(&c->evq, c->fd, events, handler, c);
 
     if (conn_waiting(c)) margin = SAFETY_MARGIN;
@@ -291,4 +290,10 @@ conn_close(conn c)
     TUBE_ASSIGN(c->use, NULL);
 
     conn_free(c);
+}
+
+job
+get_reserved_jobs(conn c)
+{
+  return &c->reserved_jobs;
 }

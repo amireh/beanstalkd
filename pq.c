@@ -180,3 +180,8 @@ pq_remove(pq q, job j)
 
     return j;
 }
+
+job*
+pq_heap(pq q) {
+  return q->heap;
+}
